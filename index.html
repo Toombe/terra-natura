@@ -94,29 +94,86 @@ h2{font-weight:800;line-height:.95;text-shadow:0 2px 14px rgba(0,0,0,.6)}
 </main>
 
 <script>
-/* ============ EDIT THESE ============ */
-// The moment the FIRST map in the list below goes live. "Z" = UTC.
-// For local time use an offset instead, e.g. "2026-11-09T18:00:00+02:00"
-const ROTATION_START = "2026-11-09T00:00:00Z";
-// How many days each map stays active
-const DAYS_PER_MAP = 7;
-// Rotation order (loops forever). img = artwork, c1/c2 = fallback colours if the image can't load
-const WIKI = "https://ark.wiki.gg/images/";
+// Rotation order (loops forever, starts january). img = artwork, c1/c2 = fallback colours if the image can't load
 const MAPS = [
-  { name: "Aberration",     img: WIKI + "Aberration_DLC.jpg",     c1: "#0f766e", c2: "#1e3a8a" },
-  { name: "Scorched Earth", img: WIKI + "Scorched_Earth_DLC.jpg", c1: "#b45309", c2: "#7c2d12" },
-  { name: "Extinction",     img: WIKI + "Extinction_DLC.jpg",     c1: "#6d28d9", c2: "#0e7490" }
+  { name: "Scorched Earth", img: "images/ASA_ScorchedEarth_KeyArt.webp", c1: "#b45309", c2: "#7c2d12" },
+  { name: "Extinction",     img: "images/ASA_Extinction_KeyArt.webp",     c1: "#6d28d9", c2: "#0e7490" },
+  { name: "Aberration",     img: "images/ASA_Aberration_KeyArt.webp",     c1: "#0f766e", c2: "#1e3a8a" }
 ];
-/* ==================================== */
 
 const $ = id => document.getElementById(id);
 const pad = n => String(n).padStart(2, "0");
-const DUR = DAYS_PER_MAP * 864e5, T0 = Date.parse(ROTATION_START);
 const LABELS = ["days", "hrs", "min", "sec"];
-let shown = -1, refs = [];
+let shown = -1;
 
 function timerHTML() {
   return '<div class="timer">' + LABELS.map(l => `<div><b>00</b><i>${l}</i></div>`).join("") + "</div>";
+}
+
+// Precise helper to find the exact UTC timestamp for the 1st of the month at 14:30 Finland time
+function getRotationDate(year, month) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Helsinki',
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+    hour12: false
+  });
+  
+  // Scan across UTC hours around 11:00-13:00 UTC (since 14:30 Finland is either UTC+2 or UTC+3)
+  let targetUtc = Date.UTC(year, month, 1, 12, 30, 0);
+  for (let h = 10; h <= 13; h++) {
+    for (let m = 0; m < 60; m += 30) {
+      let testDate = new Date(Date.UTC(year, month, 1, h, m, 0));
+      let parts = dtf.formatToParts(testDate);
+      let getPart = type => parts.find(p => p.type === type).value;
+      if (Number(getPart('hour')) === 14 && Number(getPart('minute')) === 30 && Number(getPart('day')) === 1) {
+        return testDate.getTime();
+      }
+    }
+  }
+  return targetUtc;
+}
+
+// Get Finland time parts from a timestamp
+const fnGetFinlandParts = (timestamp) => {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Helsinki',
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: 'numeric'
+  });
+  const parts = dtf.formatToParts(new Date(timestamp));
+  return {
+    year: Number(parts.find(p => p.type === 'year').value),
+    month: Number(parts.find(p => p.type === 'month').value) - 1, // 0-indexed
+    day: Number(parts.find(p => p.type === 'day').value)
+  };
+};
+
+function getCurrentRotationState() {
+  const now = Date.now();
+  const { year: curYear, month: curMonth } = fnGetFinlandParts(now);
+
+  let thisMonthRotation = getRotationDate(curYear, curMonth);
+  let activeMonthIndex, nextRotationTime;
+
+  if (now >= thisMonthRotation) {
+    activeMonthIndex = curMonth;
+    let nextMonth = curMonth + 1;
+    let nextYear = curYear;
+    if (nextMonth > 11) { nextMonth = 0; nextYear++; }
+    nextRotationTime = getRotationDate(nextYear, nextMonth);
+  } else {
+    let prevMonth = curMonth - 1;
+    let prevYear = curYear;
+    if (prevMonth < 0) { prevMonth = 11; prevYear--; }
+    activeMonthIndex = prevMonth;
+    nextRotationTime = thisMonthRotation;
+  }
+
+  const curMapIndex = ((activeMonthIndex % MAPS.length) + MAPS.length) % MAPS.length;
+  const timeLeft = nextRotationTime - now;
+
+  return { cur: curMapIndex, left: timeLeft, nextRotationTime };
 }
 
 function build(cur) {
@@ -125,27 +182,46 @@ function build(cur) {
     el.style.setProperty("--c1", m.c1);
     el.style.setProperty("--c2", m.c2);
     const tag = slot === 0 ? '<span class="tag">Current</span>' : slot === 1 ? '<span class="tag nxt">Next</span>' : "";
+    const loadingAttr = slot === 0 ? 'fetchpriority="high"' : 'loading="lazy" decoding="async"';
+
     el.innerHTML =
-      `<img src="${m.img}" alt="${m.name} artwork" decoding="async" onerror="this.remove()">` +
+      `<img src="${m.img}" alt="${m.name} artwork" ${loadingAttr} onerror="this.remove()">` +
       `<div class="shade"></div>${tag}` +
       `<div class="info"><h2>${m.name}</h2>${slot ? timerHTML() : ""}</div>`;
-    refs[slot] = slot ? [...el.querySelectorAll("b")] : null;
   });
 }
 
-function show(slot, ms) {
+function show(el, ms) {
+  if (!el) return;
   const s = Math.max(0, Math.ceil(ms / 1000));
   const v = [Math.floor(s / 86400), Math.floor(s % 86400 / 3600), Math.floor(s % 3600 / 60), s % 60];
-  refs[slot].forEach((b, i) => { const t = pad(v[i]); if (b.textContent !== t) b.textContent = t; });
+  const bTags = el.querySelectorAll("b");
+  bTags.forEach((b, i) => {
+    const t = pad(v[i]);
+    if (b.textContent !== t) b.textContent = t;
+  });
 }
 
 function tick() {
-  const elapsed = Date.now() - T0;
-  const cur = ((Math.floor(elapsed / DUR) % MAPS.length) + MAPS.length) % MAPS.length;
-  const left = DUR - (((elapsed % DUR) + DUR) % DUR);   // ms until the next map goes live
-  if (cur !== shown) { build(cur); shown = cur; }
-  show(1, left);          // "Next" map
-  show(2, left + DUR);    // the one after
+  const state = getCurrentRotationState();
+  if (state.cur !== shown) { 
+    build(state.cur); 
+    shown = state.cur; 
+  }
+  
+  // Slot 1 countdown (Time until Next map)
+  show($("c1"), state.left);          
+
+  // Slot 2 countdown (Time from Next rotation to the subsequent rotation)
+  const nextFinParts = fnGetFinlandParts(state.nextRotationTime);
+  let nMonth = nextFinParts.month + 1;
+  let nYear = nextFinParts.year;
+  if (nMonth > 11) { nMonth = 0; nYear++; }
+  
+  const followingRotationTime = getRotationDate(nYear, nMonth);
+  const subsequentLeft = followingRotationTime - Date.now();
+  
+  show($("c2"), subsequentLeft);
 }
 
 /* Theme toggle + cookie (remembered for 1 year) */
